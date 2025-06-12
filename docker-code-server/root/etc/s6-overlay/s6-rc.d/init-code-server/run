@@ -1,0 +1,78 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Set configurable username (default to eyantra)
+USER_NAME=${USER_NAME:-eyantra}
+
+# Rename the default 'abc' user to the desired username if different
+if [[ "${USER_NAME}" != "abc" ]] && id "abc" &>/dev/null && ! id "${USER_NAME}" &>/dev/null; then
+    echo "Renaming user 'abc' to '${USER_NAME}'"
+    
+    # Create new group with the desired name
+    groupadd "${USER_NAME}" 2>/dev/null || true
+    
+    # Rename user but don't move home directory yet
+    usermod -g "${USER_NAME}" -l "${USER_NAME}" abc
+    
+    # Update group references in /etc/group
+    sed -i "s/abc/${USER_NAME}/g" /etc/group
+    
+    echo "User successfully renamed to '${USER_NAME}'"
+fi
+
+# Create all necessary directories with proper permissions first
+mkdir -p /config/{extensions,data,workspace,.ssh,.config,.local/share/code-server}
+
+# Always ensure symlink is created properly 
+echo "Setting up home directory symlink for ${USER_NAME}"
+rm -rf "/home/${USER_NAME}" 2>/dev/null || true
+ln -sf /config "/home/${USER_NAME}"
+
+# Update user's home directory in passwd to point to /config
+sed -i "s|^${USER_NAME}:.*:/home/${USER_NAME}:|${USER_NAME}:x:911:911:${USER_NAME}:/config:|" /etc/passwd
+
+if [[ -z ${LSIO_NON_ROOT_USER} ]] && [[ -z ${LSIO_READ_ONLY_FS} ]]; then
+    if [[ -n "${SUDO_PASSWORD}" ]] || [[ -n "${SUDO_PASSWORD_HASH}" ]]; then
+        echo "setting up sudo access for user: ${USER_NAME}"
+        if ! grep -q "${USER_NAME}" /etc/sudoers; then
+            echo "adding ${USER_NAME} to sudoers"
+            echo "${USER_NAME} ALL=(ALL:ALL) ALL" >> /etc/sudoers
+        fi
+        if [[ -n "${SUDO_PASSWORD_HASH}" ]]; then
+            echo "setting sudo password using sudo password hash"
+            sed -i "s|^${USER_NAME}:\!:|${USER_NAME}:${SUDO_PASSWORD_HASH}:|" /etc/shadow
+        else
+            echo "setting sudo password using SUDO_PASSWORD env var"
+            echo -e "${SUDO_PASSWORD}\n${SUDO_PASSWORD}" | passwd ${USER_NAME}
+        fi
+    fi
+fi
+
+# Now copy files
+if [[ ! -f /config/.bashrc ]]; then
+    cp /root/.bashrc /config/.bashrc
+fi
+
+if [[ ! -f /config/.profile ]]; then
+    cp /root/.profile /config/.profile
+fi
+
+if [[ -z ${LSIO_NON_ROOT_USER} ]]; then
+    # Set ownership of all config files and directories
+    echo "Setting up permissions for user: ${USER_NAME}"
+    chown -R ${USER_NAME}:${USER_NAME} /config
+    
+    # Set specific permissions for SSH
+    chmod 700 /config/.ssh
+    if [[ -n "$(ls -A /config/.ssh 2>/dev/null)" ]]; then
+        find /config/.ssh/ -type d -exec chmod 700 '{}' \;
+        find /config/.ssh/ -type f -exec chmod 600 '{}' \;
+        find /config/.ssh/ -type f -iname '*.pub' -exec chmod 644 '{}' \;
+    fi
+    
+    # Ensure code-server directories have correct permissions
+    chmod 755 /config/.config
+    chmod 755 /config/.local
+    chmod 755 /config/.local/share
+    chmod 755 /config/.local/share/code-server
+fi
